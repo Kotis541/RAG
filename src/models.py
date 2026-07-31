@@ -1,27 +1,41 @@
-class RagPipeline:
-    """CLI for the Retrieval-Augmented Generation system."""
-    def index(self, max_chunk_size: int = 2000):
-        """Index the repository."""
-        # Sem pak přijde logika pro načtení a rozsekání dat
-        return f"Indexing complete with chunk size: {max_chunk_size}"
-    
-    def search(self, query: str, k: int = 10) -> str:
-        """Search for a single query."""
-        return f"Searching for: '{query}' (top {k} results)"
-    
-    def search_dataset(self, dataset_path: str, k: int = 10, save_directory: str = "data/output/search_results") -> str:
-        """Process multiple questions and output search results."""
-        return f"Searching dataset from {dataset_path}"
-    
-    def answer(self, query: str, k: int = 10) -> str:
-        """Answer a single question with context."""
-        return f"Answering query: '{query}'"
-    
-    def answer_dataset(self, student_search_results_path: str, save_directory: str = "data/output/search_results_and_answer") -> str:
-        """Generate answers from search results."""
-        return f"Answering dataset based on {student_search_results_path}"
-    
-    def evaluate(self, student_answer_path: str, dataset_path: str, k: int = 10, max_context_length: int = 2000) -> str:
-        """Evaluate search results against ground truth."""
-        return "Evaluating search results..."
+from pydantic import BaseModel, Field
+import uuid
+from typing import List
 
+class MinimalSource(BaseModel):
+    file_path: str
+    first_character_index: int
+    last_character_index: int
+
+
+class UnansweredQuestion(BaseModel):
+    question_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    question: str
+
+
+class AnsweredQuestion(UnansweredQuestion):
+    sources: List[MinimalSource]
+    answer: str
+
+
+class RagDataset(BaseModel):
+    raq_questions: List[AnsweredQuestion | UnansweredQuestion]
+
+
+class MinimalSearchResults(BaseModel):
+    question_id: str
+    question: str
+    retrieved_sources: List[MinimalSource]
+
+
+class MinimalAnswer(MinimalSearchResults):
+    answer: str
+
+
+class StudentSearchResults(BaseModel):
+    search_results: List[MinimalSearchResults]
+    k: int
+
+
+class StudentSearchResultsAndAnswer(StudentSearchResults):
+    search_results: List[MinimalAnswer]
