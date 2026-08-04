@@ -19,7 +19,7 @@ class AnsweredQuestion(UnansweredQuestion):
 
 
 class RagDataset(BaseModel):
-    raq_questions: List[AnsweredQuestion | UnansweredQuestion]
+    rag_questions: List[AnsweredQuestion | UnansweredQuestion]
 
 
 class MinimalSearchResults(BaseModel):

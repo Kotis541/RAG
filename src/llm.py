@@ -9,10 +9,8 @@ class LLMGenerator:
         Initializes the generator by loading the model and tokenizer.
         It will automatically use a GPU if available.
         """
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device)
-        # Left-padding is required for batch generation with causal LMs
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16).to("mps")
         self.tokenizer.padding_side = 'left'
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -30,7 +28,8 @@ class LLMGenerator:
         Generates an answer based on the provided context and question.
         """
         prompt = self._build_prompt(context, user_question)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        inputs = {k: v.to("mps") for k, v in inputs.items()}
         
         outputs = self.model.generate(**inputs, max_new_tokens=60, do_sample=False)
         new_tokens = outputs[0][inputs['input_ids'].shape[1]:]

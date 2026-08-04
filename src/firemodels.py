@@ -14,12 +14,12 @@ class RagPipeline:
         self.searcher = BM25Searcher()
         self.llm = LLMGenerator()
 
-    def index(self, max_chunk_size: int = 1000):
+    def index(self, max_chunk_size: int = 2000):
         """Index the repository."""
         try:
             chunker = RagChunker()
             parser = RagParser()
-            docs = parser.load_vocabulary("vllm-0.10.1")
+            docs = parser.load_vocabulary("data/raw/vllm-0.10.1")
             all_chunks = []
 
             os.makedirs("data/processed", exist_ok=True)
@@ -44,7 +44,8 @@ class RagPipeline:
     
     def search(self, query: str, k: int = 3) -> str:
         top_result = self.searcher.search(query, k)
-        return json.dumps(top_result, indent=2)
+        for result in top_result:
+            print(f"{result['file_path']} [{result['first_character_index']}:{result['last_character_index']}]")
 
     
     def search_dataset(self, dataset_path: str, k: int = 5, save_directory: str = "data/output/search_results") -> str:
@@ -71,7 +72,7 @@ class RagPipeline:
 
         with open(save_directory, 'w', encoding='utf-8') as f:
             f.write(output.model_dump_json(indent=2))
-        return f"Search results saved to {save_directory}"
+        return f"Saved student_search_results saved to {save_directory}"
 
 
     def answer(self, query: str, k: int = 1) -> str:
@@ -89,7 +90,6 @@ class RagPipeline:
 
         context_parts = []
         for path, chunks in chunks_by_file.items():
-            print(f"path {path}")
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -175,7 +175,6 @@ class RagPipeline:
             )
             answered_results.append(result_entry)
 
-            # Save after every answer
             final_output = StudentSearchResultsAndAnswer(search_results=answered_results, k=k)
             with open(save_directory, 'w', encoding='utf-8') as f:
                 f.write(final_output.model_dump_json(indent=2))
@@ -184,6 +183,49 @@ class RagPipeline:
         return f"Answered dataset saved to {save_directory}"
 
 
-    def evaluate(self, student_answer_path: str, dataset_path: str, k: int = 5, max_context_length: int = 2000) -> str:
-        """Evaluate search results against ground truth."""
-        return "Evaluating search results..."
+    def evaluate(self, student_answer_path: str, dataset_path: str, k: int = 10, max_context_length: int = 2000) -> str:
+        with open(student_answer_path, 'r') as f:
+            student_results = json.load(f)
+
+        with open(dataset_path, 'r') as f:
+            ground_truth = json.load(f)
+
+        if StudentSearchResults.validate(student_results):
+            print("Student answers is valid: True")
+        print(f"Total number of questions: {len(ground_truth['rag_questions']) + 1}")
+        questions_with_sources = sum(1 for q in ground_truth['rag_questions'] if 'sources' in q)
+        print(f"Total number of questions with sources: {questions_with_sources + 1}")
+        student_with_sources = sum(1 for q in student_results['search_results'] if 'retrieved_sources' in q)
+        print(f"Total number of questions with student sources: {student_with_sources + 1}")
+        print("")
+        print("Evaluation Results")
+        print("========================================", end="\n")
+
+        student_map = {
+            result['question_id']: result['retrieved_sources']
+            for result in student_results['search_results']
+        }
+
+        for k in [1, 3, 5, 10]:
+            recall_sum = 0
+            num_questions = 0
+
+            for question in ground_truth['rag_questions']:
+                if not question['sources']:
+                    continue
+                qt_sources = question['sources']
+                student_sources = student_map.get(question['question_id'], [])[:k]
+                hits = 0
+                for qt_source in qt_sources:
+                    for student_source in student_sources:
+                        if qt_source['file_path'] == student_source['file_path']:
+                            overlap = min(qt_source['last_character_index'], student_source['last_character_index']) - max(qt_source['first_character_index'], student_source['first_character_index'])
+                            union = max(qt_source['last_character_index'], student_source['last_character_index']) - min(qt_source['first_character_index'], student_source['first_character_index'])
+                            IoU = overlap / union
+                            if IoU >= 0.05:
+                                hits += 1
+                                break
+                num_questions += 1
+                recall_q = hits / len(qt_sources)
+                recall_sum += recall_q
+            print(f"Recall@{k}: {(recall_sum / num_questions):.3f}")

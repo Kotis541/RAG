@@ -16,7 +16,7 @@ class RagParser:
                     content = path.read_text(encoding="utf-8")
 
                     documents.append({
-                        "file_path": "data/raw/" + str(path),
+                        "file_path": str(path),
                         "content": content
                     })
                 except Exception as e:
