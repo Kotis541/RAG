@@ -1,7 +1,9 @@
+UV_CACHE = /sgoinfre/.uv_cache
+
 .PHONY: install run clean lint debug
 
 install:
-	uv sync
+	UV_CACHE_DIR=$(UV_CACHE) uv sync
 
 run:
 	uv run python -m src

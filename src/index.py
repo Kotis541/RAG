@@ -1,5 +1,3 @@
-from transformers.models import qwen2_audio
-from torch import chunk
 import bm25s
 from typing import Any
 import pickle
@@ -27,7 +25,7 @@ def _split_identifiers(text: str) -> str:
     return result.lower()
 
 
-def tokenize(file: list[dict[str, Any]]):
+def tokenize(file: list[dict[str, Any]], save_path: str = "data/processed"):
     corpus = [
         _split_identifiers(
             chunk['file_path'] + '\n' 
@@ -44,7 +42,6 @@ def tokenize(file: list[dict[str, Any]]):
     retriever = bm25s.BM25()
     retriever.index(corpus_tokens)
 
-    save_path = "data/processed"
     os.makedirs(save_path, exist_ok=True)
     retriever.save(save_path)
     with open(os.path.join(save_path, "chunks.pkl"), "wb") as f:

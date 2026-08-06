@@ -5,26 +5,45 @@ from .llm import LLMGenerator
 from .models import StudentSearchResults, MinimalSearchResults, RagDataset, StudentSearchResultsAndAnswer, MinimalAnswer, MinimalSource
 import os
 import json
+from tqdm import tqdm
+
+
+def _validate_k(k: int, name: str = "k") -> None:
+    """Raise ValueError if k is out of the valid range [1, 19]."""
+    if k <= 0 or k >= 20:
+        raise ValueError(f"{name} must be between 1 and 19, got {k}")
+
 
 class RagPipeline:
     """CLI for the Retrieval-Augmented Generation system."""
 
-    def __init__(self):
+    def __init__(self, index_path: str = "data/processed"):
         """Initializes the pipeline by loading the search index and LLM."""
-        self.searcher = BM25Searcher()
+        self.index_path = index_path
+        self.searcher = BM25Searcher(load_path=index_path)
         self.llm = LLMGenerator()
 
-    def index(self, max_chunk_size: int = 2000):
-        """Index the repository."""
+    def index(self, input_path: str = "data/raw/vllm-0.10.1", output_path: str = "data/processed", max_chunk_size: int = 2000):
+        """Index the repository.
+        
+        Args:
+            input_path: Path to the repository root to index.
+            output_path: Directory where the BM25 index and chunks will be saved.
+            max_chunk_size: Maximum size of each chunk in characters (1-2000).
+        """
+        if max_chunk_size > 2000:
+            raise ValueError("max_chunk_size is too big, maximum is 2000!")
+        elif max_chunk_size <= 0:
+            raise ValueError("max_chunk_size must be more than 0")
         try:
             chunker = RagChunker()
             parser = RagParser()
-            docs = parser.load_vocabulary("data/raw/vllm-0.10.1")
+            docs = parser.load_vocabulary(input_path)
             all_chunks = []
 
-            os.makedirs("data/processed", exist_ok=True)
+            os.makedirs(output_path, exist_ok=True)
 
-            for file in docs:
+            for file in tqdm(docs, desc="Chunking files", unit="file"):
                 file_content = file['content']
                 for chunk in chunker.chunk_files(file, max_chunk_size):
                     start = chunk["first_character_index"]
@@ -35,47 +54,97 @@ class RagPipeline:
                     chunk_with_content['class_name'] = RagChunker._extract_names(file_content, start, end)
                     all_chunks.append(chunk_with_content)
             
-            tokenize(all_chunks)
-            self.searcher = BM25Searcher()
-            return "Ingestion complete! Indices saved under data/processed/"
+            tokenize(all_chunks, save_path=output_path)
+            self.searcher = BM25Searcher(load_path=output_path)
+            return f"Ingestion complete! Indices saved under {output_path}/"
         except Exception as e:
             print(f"[INDEX ERROR]: {e}")
 
     
     def search(self, query: str, k: int = 3) -> str:
-        top_result = self.searcher.search(query, k)
-        for result in top_result:
-            print(f"{result['file_path']} [{result['first_character_index']}:{result['last_character_index']}]")
+        """Search the index for the top-k most relevant chunks.
+
+        Args:
+            query: The search query string.
+            k: Number of results to return (1-19).
+        """
+        _validate_k(k)
+        if not query or not query.strip():
+            print("[SEARCH ERROR]: query must not be empty")
+            return
+
+        try:
+            top_result = self.searcher.search(query, k)
+            for result in top_result:
+                print(f"{result['file_path']} [{result['first_character_index']}:{result['last_character_index']}]")
+        except Exception as e:
+            print(f"[SEARCH ERROR]: {e}")
 
     
     def search_dataset(self, dataset_path: str, k: int = 5, save_directory: str = "data/output/search_results") -> str:
-        os.makedirs(os.path.dirname(save_directory), exist_ok=True)
+        """Run batch search over a dataset and save results.
 
-        with open(dataset_path, 'r') as json_file:
-            raw_data = json.load(json_file)
+        Args:
+            dataset_path: Path to the JSON dataset file.
+            k: Number of results per question (1-19).
+            save_directory: Output file path for search results JSON.
+        """
+        _validate_k(k)
+        try:
+            parent = os.path.dirname(save_directory)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
 
-        dataset = RagDataset.model_validate(raw_data)
-        questions = [q.question for q in dataset.rag_questions]
-        batch_results = self.searcher.search_batch(questions, k)
+            with open(dataset_path, 'r') as json_file:
+                raw_data = json.load(json_file)
 
-        search_results = []
-        for question_data, top_results in zip(dataset.rag_questions, batch_results):
-            sources = [MinimalSource.model_validate(source) for source in top_results]
-            result_entry = MinimalSearchResults(
-                question_id=question_data.question_id,
-                question=question_data.question,
-                retrieved_sources=sources,
-            )
-            search_results.append(result_entry)
+        except FileNotFoundError:
+            print(f"[SEARCH ERROR]: dataset file not found: {dataset_path}")
+            return
+        except json.JSONDecodeError as e:
+            print(f"[SEARCH ERROR]: malformed JSON in {dataset_path}: {e}")
+            return
 
-        output = StudentSearchResults(search_results=search_results, k=k)
+        try:
+            dataset = RagDataset.model_validate(raw_data)
+            questions = [q.question for q in dataset.rag_questions]
+            if not questions:
+                print("[SEARCH ERROR]: dataset contains no questions")
+                return
 
-        with open(save_directory, 'w', encoding='utf-8') as f:
-            f.write(output.model_dump_json(indent=2))
-        return f"Saved student_search_results saved to {save_directory}"
+            batch_results = self.searcher.search_batch(questions, k)
+
+            search_results = []
+            for question_data, top_results in zip(dataset.rag_questions, batch_results):
+                sources = [MinimalSource.model_validate(source) for source in top_results]
+                result_entry = MinimalSearchResults(
+                    question_id=question_data.question_id,
+                    question=question_data.question,
+                    retrieved_sources=sources,
+                )
+                search_results.append(result_entry)
+
+            output = StudentSearchResults(search_results=search_results, k=k)
+
+            with open(save_directory, 'w', encoding='utf-8') as f:
+                f.write(output.model_dump_json(indent=2))
+            return f"Saved student_search_results saved to {save_directory}"
+        
+        except Exception as e:
+            print(f"[SEARCH ERROR]: {e}")
 
 
-    def answer(self, query: str, k: int = 1) -> str:
+    def answer(self, query: str, k: int = 5) -> str:
+        """Answer a single query using retrieved context.
+
+        Args:
+            query: The question to answer.
+            k: Number of source chunks to retrieve (1-19).
+        """
+        _validate_k(k)
+        if not query or not query.strip():
+            return "[ANSWER ERROR]: query must not be empty"
+
         top_results = self.searcher.search(query, k)
 
         if not top_results:
@@ -110,15 +179,35 @@ class RagPipeline:
         return answer
     
     def answer_dataset(self, student_search_results_path: str, save_directory: str = "data/output/search_results_and_answer", k: int = 5) -> str:
-        os.makedirs(os.path.dirname(save_directory), exist_ok=True)
+        """Generate answers for all questions in a dataset.
 
-        with open(student_search_results_path, 'r', encoding='utf-8') as f:
-            raw_data = json.load(f)
+        Args:
+            student_search_results_path: Path to the dataset JSON file.
+            save_directory: Output file path for answers JSON.
+            k: Number of source chunks per question (1-19).
+        """
+        _validate_k(k)
+
+        try:
+            parent = os.path.dirname(save_directory)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+            with open(student_search_results_path, 'r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+        except FileNotFoundError:
+            print(f"[ANSWER ERROR]: file not found: {student_search_results_path}")
+            return
+        except json.JSONDecodeError as e:
+            print(f"[ANSWER ERROR]: malformed JSON in {student_search_results_path}: {e}")
+            return
 
         dataset = RagDataset.model_validate(raw_data)
         questions = [q.question for q in dataset.rag_questions]
+        if not questions:
+            print("[ANSWER ERROR]: dataset contains no questions")
+            return
 
-        # --- Batch Processing ---
         print(f"1/3: Searching for sources for {len(questions)} questions in a batch...")
         batch_top_results = self.searcher.search_batch(questions, k)
 
@@ -155,7 +244,7 @@ class RagPipeline:
         print(f"3/3: Generating answers for {len(questions)} questions...")
 
         answered_results = []
-        for i in range(len(questions)):
+        for i in tqdm(range(len(questions)), desc="Generating answers", unit="q"):
             question_data = dataset.rag_questions[i]
             top_results = batch_top_results[i]
             context = contexts[i]
@@ -178,25 +267,46 @@ class RagPipeline:
             final_output = StudentSearchResultsAndAnswer(search_results=answered_results, k=k)
             with open(save_directory, 'w', encoding='utf-8') as f:
                 f.write(final_output.model_dump_json(indent=2))
-            print(f"  [{i+1}/{len(questions)}] Saved to {save_directory}")
 
         return f"Answered dataset saved to {save_directory}"
 
 
     def evaluate(self, student_answer_path: str, dataset_path: str, k: int = 10, max_context_length: int = 2000) -> str:
-        with open(student_answer_path, 'r') as f:
-            student_results = json.load(f)
+        """Evaluate student search results against ground truth.
 
-        with open(dataset_path, 'r') as f:
-            ground_truth = json.load(f)
+        Args:
+            student_answer_path: Path to the student search results JSON.
+            dataset_path: Path to the ground-truth dataset JSON.
+            k: Unused parameter kept for CLI compatibility.
+            max_context_length: Unused parameter kept for CLI compatibility.
+        """
+        try:
+            with open(student_answer_path, 'r') as f:
+                student_results = json.load(f)
+        except FileNotFoundError:
+            print(f"[EVALUATE ERROR]: file not found: {student_answer_path}")
+            return
+        except json.JSONDecodeError as e:
+            print(f"[EVALUATE ERROR]: malformed JSON in {student_answer_path}: {e}")
+            return
 
-        if StudentSearchResults.validate(student_results):
+        try:
+            with open(dataset_path, 'r') as f:
+                ground_truth = json.load(f)
+        except FileNotFoundError:
+            print(f"[EVALUATE ERROR]: file not found: {dataset_path}")
+            return
+        except json.JSONDecodeError as e:
+            print(f"[EVALUATE ERROR]: malformed JSON in {dataset_path}: {e}")
+            return
+
+        if StudentSearchResults.model_validate(student_results):
             print("Student answers is valid: True")
-        print(f"Total number of questions: {len(ground_truth['rag_questions']) + 1}")
+        print(f"Total number of questions: {len(ground_truth['rag_questions'])}")
         questions_with_sources = sum(1 for q in ground_truth['rag_questions'] if 'sources' in q)
-        print(f"Total number of questions with sources: {questions_with_sources + 1}")
+        print(f"Total number of questions with sources: {questions_with_sources}")
         student_with_sources = sum(1 for q in student_results['search_results'] if 'retrieved_sources' in q)
-        print(f"Total number of questions with student sources: {student_with_sources + 1}")
+        print(f"Total number of questions with student sources: {student_with_sources}")
         print("")
         print("Evaluation Results")
         print("========================================", end="\n")
@@ -211,7 +321,7 @@ class RagPipeline:
             num_questions = 0
 
             for question in ground_truth['rag_questions']:
-                if not question['sources']:
+                if not question.get('sources'):
                     continue
                 qt_sources = question['sources']
                 student_sources = student_map.get(question['question_id'], [])[:k]
@@ -228,4 +338,7 @@ class RagPipeline:
                 num_questions += 1
                 recall_q = hits / len(qt_sources)
                 recall_sum += recall_q
-            print(f"Recall@{k}: {(recall_sum / num_questions):.3f}")
+
+            if k == 1:
+                print(f"Questions evaluated: {num_questions}")
+            print(f"Recall@{k}: {(recall_sum / num_questions):.3f} ({(recall_sum / num_questions) * 100:.1f}%)")

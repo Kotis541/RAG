@@ -1,5 +1,6 @@
 src/__pycache__
 .venv
-vllm-0.10.1
+vllm
 data/processed
 .DS_Store
+moulinette-ubuntu

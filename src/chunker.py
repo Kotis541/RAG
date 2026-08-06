@@ -50,27 +50,34 @@ class RagChunker:
 
         if ".md" in file['file_path']:
             segments = []
-            pos = 0
-            while pos < content_len:
-                try:
-                    boundary = content.index("\n\n", pos)
-                    seq_end = boundary + 2
-                except ValueError:
-                    seq_end = content_len
 
-                if seq_end - pos > size:
-                    sub = pos
-                    while sub < seq_end:
-                        end = min(sub + size, seq_end)
-                        if end < seq_end:
+            # Find all heading positions (lines starting with one or more #)
+            heading_positions = [0]
+            for match in re.finditer(r'(?:^|\n)(#{1,6} )', content):
+                pos = match.start(1) if match.start(0) == 0 else match.start(0) + 1
+                if pos > 0:
+                    heading_positions.append(pos)
+            heading_positions.append(content_len)
+
+            for i in range(len(heading_positions) - 1):
+                sec_start = heading_positions[i]
+                sec_end = heading_positions[i + 1]
+                section_text = content[sec_start:sec_end]
+                section_len = sec_end - sec_start
+
+                if section_len > size:
+                    # Section too large: split at newline boundaries
+                    sub = sec_start
+                    while sub < sec_end:
+                        end = min(sub + size, sec_end)
+                        if end < sec_end:
                             nl = content.rfind('\n', sub, end)
                             if nl > sub:
                                 end = nl + 1
                         segments.append({'text': content[sub:end], 'start': sub})
                         sub = end
                 else:
-                    segments.append({'text': content[pos:seq_end], 'start': pos})
-                pos = seq_end
+                    segments.append({'text': section_text, 'start': sec_start})
 
             yield from yield_buffer(file['file_path'], segments, size)
 
@@ -153,14 +160,12 @@ class RagChunker:
     @staticmethod
     def _extract_names(content: str, start: int, end: int) -> str:
         chunk_text = content[start:end]
-        # Jména přímo v chunku
         names = re.findall(r'(?:class|def)\s+(\w+)', chunk_text)
         
-        # Najdi enclosing class hledáním zpětně od začátku chunku
         prefix = content[:start]
         classes = re.findall(r'^class\s+(\w+)', prefix, re.MULTILINE)
         if classes:
-            names.append(classes[-1])  # poslední class před chunkem = enclosing
+            names.append(classes[-1])
         
         return ' '.join(names)
 

@@ -12,4 +12,5 @@ dependencies = [
     "pydantic>=2.13.4",
     "torch>=2.13.0",
     "transformers>=5.14.1",
+    "tqdm>=4.66.0",
 ]

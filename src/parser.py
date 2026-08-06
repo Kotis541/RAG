@@ -12,6 +12,8 @@ class RagParser:
         
         for path in base_dir.rglob("*"):
             if path.is_file() and path.suffix in [".py", ".md"]:
+                if "tests" in path.parts:
+                    continue
                 try:
                     content = path.read_text(encoding="utf-8")
 
