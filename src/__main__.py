@@ -1,11 +1,9 @@
 import fire
 from .firemodels import RagPipeline
-from .parser import RagParser
-from .chunker import RagChunker
-from .index import tokenize
 
 
 def main() -> None:
+    """Entry point for the RAG CLI."""
     fire.Fire(RagPipeline)
 
 if __name__ == "__main__":

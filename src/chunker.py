@@ -1,4 +1,3 @@
-import json.encoder
 from typing import Dict, Any, Generator
 from .parser import RagParser
 import ast
@@ -6,7 +5,7 @@ import re
 
 
 def yield_buffer(file_path: str, buffer: list, size: int) -> Generator[Dict[str, Any], None, None]:
-    """Helper to yield chunks from a buffer of text segments."""
+    """Yield fixed-size chunks from a list of text segments, respecting segment boundaries."""
     current_chunk_segments = []
     current_chunk_len = 0
 
@@ -20,7 +19,7 @@ def yield_buffer(file_path: str, buffer: list, size: int) -> Generator[Dict[str,
             current_chunk_segments, current_chunk_len = [], 0
         current_chunk_segments.append(segment)
         current_chunk_len += len(segment['text'])
-    
+
     if current_chunk_segments:
         yield {
             "file_path": file_path,
@@ -29,22 +28,28 @@ def yield_buffer(file_path: str, buffer: list, size: int) -> Generator[Dict[str,
         }
 
 
-def _line_offsets(content):
+def _line_offsets(content: str) -> list:
+    """Return a list of character offsets for the start of each line in content."""
     offset = [0]
     for i, ch in enumerate(content):
         if ch == '\n':
             offset.append(i + 1)
     return offset
 
-def _node_range(offsets, node):
+
+def _node_range(offsets: list, node: ast.AST) -> tuple:
+    """Return the (start, end) character range of an AST node using precomputed line offsets."""
     start = offsets[node.lineno - 1] + node.col_offset
     end = offsets[node.end_lineno - 1] + node.end_col_offset
     return start, end
 
+
 class RagChunker:
+    """Splits source files into overlapping text chunks suitable for indexing."""
+
     @staticmethod
     def chunk_files(file: Dict[str, str], size: int) -> Generator[Dict[str, Any], None, None]:
-        start_index = 0
+        """Yield character-range chunks for a single file, using AST boundaries for .py and headings for .md."""
         content = file["content"]
         content_len = len(content)
 
@@ -88,7 +93,7 @@ class RagChunker:
                 buffer_len = 0
                 offsets = _line_offsets(content)
                 flat_ranges = RagChunker._flatten_nodes(nodes, offsets, size)
-                
+
                 cursor = 0
 
                 for node_start, node_end in flat_ranges:
@@ -96,21 +101,21 @@ class RagChunker:
                         inter_text = content[cursor:node_start]
                         buffer.append({'text': inter_text, 'start': cursor})
                         buffer_len += len(inter_text)
-                    
+
                     segment_text = content[node_start:node_end]
                     segment_len = len(segment_text)
                     if segment_len > size:
                         if buffer:
                             yield from yield_buffer(file['file_path'], buffer, size)
                             buffer, buffer_len = [], 0
-                        
+
                         line_start = 0
                         while line_start < segment_len:
                             search_start = line_start + size
                             line_end = segment_text.rfind('\n', line_start, search_start)
                             if line_end == -1 or line_end <= line_start:
                                 line_end = min(line_start + size, segment_len)
-                            
+
                             yield {
                                 "file_path": file["file_path"],
                                 "first_character_index": node_start + line_start,
@@ -124,7 +129,7 @@ class RagChunker:
                         buffer.append({'text': segment_text, 'start': node_start})
                         buffer_len += segment_len
                     cursor = node_end
-                
+
                 if buffer:
                     yield from yield_buffer(file['file_path'], buffer, size)
             except SyntaxError:
@@ -134,8 +139,10 @@ class RagChunker:
                         "first_character_index": 0,
                         "last_character_index": len(content)
                     }
+
     @staticmethod
-    def _flatten_nodes(nodes, offsets, size):
+    def _flatten_nodes(nodes: list, offsets: list, size: int) -> list:
+        """Recursively flatten AST nodes into (start, end) ranges, splitting large nodes into their children."""
         result = []
         for node in nodes:
             if not hasattr(node, 'end_lineno') or node.end_lineno is None:
@@ -149,24 +156,23 @@ class RagChunker:
                     if body_ranges[0][0] > start:
                         result.append((start, body_ranges[0][0]))
                     result.extend(body_ranges)
-                    
+
                     if body_ranges[-1][1] < end:
                         result.append((body_ranges[-1][1], end))
                     continue
-        
+
             result.append((start, end))
         return result
-    
+
     @staticmethod
     def _extract_names(content: str, start: int, end: int) -> str:
+        """Extract class/def names defined in a chunk plus the enclosing class name (if any)."""
         chunk_text = content[start:end]
         names = re.findall(r'(?:class|def)\s+(\w+)', chunk_text)
-        
+
         prefix = content[:start]
         classes = re.findall(r'^class\s+(\w+)', prefix, re.MULTILINE)
         if classes:
             names.append(classes[-1])
-        
-        return ' '.join(names)
 
-                
+        return ' '.join(names)
