@@ -1,7 +1,8 @@
 from .chunker import RagChunker
-from .parser import RagParser
-from .index import tokenize, BM25Searcher, ChromaSearcher, _reciprocal_rank_fusion
-from .llm import LLMGenerator
+from .loader import RagParser
+from .indexer import build_index
+from .searchers import BM25Searcher, ChromaSearcher, reciprocal_rank_fusion, Searcher
+from .generator import LLMGenerator
 from .models import StudentSearchResults, MinimalSearchResults, RagDataset, StudentSearchResultsAndAnswer, MinimalSource, MinimalAnswer
 import os
 import json
@@ -20,9 +21,9 @@ class RagPipeline:
     def __init__(self, index_path: str = "data/processed"):
         """Load the BM25 and Chroma search indexes and initialise the LLM."""
         self.index_path = index_path
-        self.searcher = BM25Searcher(load_path=index_path)
+        self.bm25: Searcher = BM25Searcher(load_path=index_path)
+        self.chroma: Searcher = ChromaSearcher()
         self.llm = LLMGenerator()
-        self.chroma_searcher = ChromaSearcher()
 
     def _load_context(self, top_results: list) -> str:
         """Read source file chunks from disk and join them into a single context string."""
@@ -45,11 +46,11 @@ class RagPipeline:
         return "\n\n".join(context_parts) if context_parts else ""
 
     def _hybrid_search(self, questions: list, k: int) -> list:
-        """Run BM25 + Chroma search for each question and fuse results with RRF."""
-        bm25_batch = self.searcher.search_batch(questions, k * 2)
-        chroma_batch = self.chroma_searcher.search_batch(questions, k * 2)
+        """Run BM25 + Chroma search for each question and fuse the results with RRF."""
+        bm25_batch = self.bm25.search_batch(questions, k * 2)
+        chroma_batch = self.chroma.search_batch(questions, k * 2)
         return [
-            _reciprocal_rank_fusion(bm25_batch[i], chroma_batch[i], k)
+            reciprocal_rank_fusion(bm25_batch[i], chroma_batch[i], k)
             for i in range(len(questions))
         ]
 
@@ -63,7 +64,7 @@ class RagPipeline:
         try:
             chunker = RagChunker()
             parser = RagParser()
-            docs = parser.load_vocabulary(input_path)
+            docs = parser.discover_files(input_path)
             all_chunks = []
 
             os.makedirs(output_path, exist_ok=True)
@@ -78,8 +79,8 @@ class RagPipeline:
                     chunk_with_content['class_name'] = RagChunker._extract_names(file_content, start, end)
                     all_chunks.append(chunk_with_content)
 
-            tokenize(all_chunks, save_path=output_path)
-            self.searcher = BM25Searcher(load_path=output_path)
+            build_index(all_chunks, save_path=output_path)
+            self.bm25 = BM25Searcher(load_path=output_path)
             return f"Ingestion complete! Indices saved under {output_path}/"
         except Exception as e:
             print(f"[INDEX ERROR]: {e}")
@@ -145,7 +146,7 @@ class RagPipeline:
         if not query or not query.strip():
             return "[ANSWER ERROR]: query must not be empty"
 
-        top_results = self.searcher.search(query, k)
+        top_results = self.bm25.search(query, k)
         if not top_results:
             return "No relevant sources found to answer the question."
 
@@ -180,8 +181,10 @@ class RagPipeline:
 
         print(f"Loaded {len(questions)} questions")
         batch_top_results = self._hybrid_search(questions, k)
-        contexts = [self._load_context(top_results) or "Could not load any context to answer the question."
-                    for top_results in batch_top_results]
+        contexts = [
+            self._load_context(top_results) or "Could not load any context to answer the question."
+            for top_results in batch_top_results
+        ]
 
         answered_results = []
         for i in tqdm(range(len(questions)), desc="Generating answers", unit="q"):
@@ -190,7 +193,7 @@ class RagPipeline:
 
             answer = self.llm.generate_answer(contexts[i], questions[i])
             sources = [
-                MinimalSource.model_validate({k: v for k, v in source.items() if k != 'content'})
+                MinimalSource.model_validate({key: val for key, val in source.items() if key != 'content'})
                 for source in top_results
             ]
             answered_results.append(MinimalAnswer(
@@ -238,7 +241,7 @@ class RagPipeline:
         print(f"Total number of questions with student sources: {student_with_sources}")
         print("")
         print("Evaluation Results")
-        print("========================================", end="\n")
+        print("========================================")
 
         student_map = {
             result['question_id']: result['retrieved_sources']

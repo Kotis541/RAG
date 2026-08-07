@@ -1,5 +1,5 @@
 import bm25s
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 import pickle
 import os
 import re
@@ -9,14 +9,27 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 
 
+@runtime_checkable
+class Searcher(Protocol):
+    """Common interface for keyword and semantic search backends."""
+
+    def search(self, query: str, k: int) -> List[Dict[str, Any]]:
+        """Return the top-k most relevant chunk dicts for a single query."""
+        ...
+
+    def search_batch(self, queries: List[str], k: int) -> List[List[Dict[str, Any]]]:
+        """Return top-k most relevant chunk dicts for each query in a batch."""
+        ...
+
+
 @lru_cache(maxsize=1)
-def _get_model() -> SentenceTransformer:
+def _get_embedding_model() -> SentenceTransformer:
     """Load and cache the sentence-transformer embedding model (singleton)."""
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 
-def _split_identifiers(text: str) -> str:
-    """Expand camelCase and snake_case identifiers into space-separated words for better BM25 tokenization."""
+def _expand_identifiers(text: str) -> str:
+    """Expand camelCase and snake_case identifiers into space-separated words for better BM25 recall."""
     def expand_camel(match):
         word = match.group(0)
         parts = re.sub(r'([a-z])([A-Z])', r'\1 \2', word)
@@ -28,50 +41,8 @@ def _split_identifiers(text: str) -> str:
     return result.lower()
 
 
-def tokenize(chunks: list[dict[str, Any]], save_path: str = "data/processed"):
-    """Build and persist the BM25 index and Chroma vector store from a list of chunk dicts."""
-    model = _get_model()
-    corpus = [
-        _split_identifiers(
-            chunk['file_path'] + '\n'
-            + chunk['file_path'] + '\n'
-            + chunk['file_path'] + '\n'
-            + chunk.get('class_name', ' ') + '\n'
-            + chunk['content']
-        )
-        for chunk in chunks
-    ]
-
-    db_path = os.path.join("data", "processed", "chroma_db")
-    chroma_client = chromadb.PersistentClient(db_path)
-    collection = chroma_client.get_or_create_collection(name="vllm_docs_code")
-
-    ids = [
-        f"{c['file_path']}: {c['first_character_index']}:{c['last_character_index']}"
-        for c in chunks
-    ]
-    embeddings = model.encode(corpus, show_progress_bar=True).tolist()
-
-    batch_size = 5000
-    for i in range(0, len(corpus), batch_size):
-        collection.add(
-            documents=corpus[i:i + batch_size],
-            ids=ids[i:i + batch_size],
-            embeddings=embeddings[i:i + batch_size]
-        )
-
-    corpus_tokens = bm25s.tokenize(corpus)
-    retriever = bm25s.BM25()
-    retriever.index(corpus_tokens)
-
-    os.makedirs(save_path, exist_ok=True)
-    retriever.save(save_path)
-    with open(os.path.join(save_path, "chunks.pkl"), "wb") as f:
-        pickle.dump(chunks, f)
-
-
 class BM25Searcher:
-    """Loads a persisted BM25 index and provides single and batch keyword search."""
+    """Keyword search backend: loads a persisted BM25 index and searches it."""
 
     def __init__(self, load_path: str = "data/processed"):
         """Load the BM25 retriever and chunk metadata from disk."""
@@ -90,7 +61,7 @@ class BM25Searcher:
         """Return the top-k chunk dicts most relevant to query using BM25 scoring."""
         if self.retriever is None or self.all_chunks is None:
             return []
-        query_tokens = bm25s.tokenize(_split_identifiers(query))
+        query_tokens = bm25s.tokenize(_expand_identifiers(query))
         results, _ = self.retriever.retrieve(query_tokens, k=k)
         return [self.all_chunks[idx] for idx in results[0]]
 
@@ -98,29 +69,40 @@ class BM25Searcher:
         """Return top-k chunk dicts for each query in a batch."""
         if self.retriever is None or self.all_chunks is None:
             return []
-        processed = [_split_identifiers(q) for q in queries]
+        processed = [_expand_identifiers(q) for q in queries]
         query_tokens = bm25s.tokenize(processed)
         results, _ = self.retriever.retrieve(query_tokens, k=k)
         return [[self.all_chunks[idx] for idx in results[i]] for i in range(len(queries))]
 
 
 class ChromaSearcher:
-    """Loads a persisted Chroma vector store and provides single and batch semantic search."""
+    """Semantic search backend: loads a persisted Chroma vector store and searches it."""
 
     def __init__(self):
         """Connect to the Chroma database and load the embedding model."""
         self.path = os.path.join("data", "processed", "chroma_db")
         self.client = chromadb.PersistentClient(self.path)
         self.collection = self.client.get_collection("vllm_docs_code")
-        self.transformer = _get_model()
+        self.transformer = _get_embedding_model()
 
     @lru_cache(maxsize=512)
     def search(self, query: str, k: int) -> List[Dict[str, Any]]:
         """Return the top-k chunk dicts most semantically similar to query."""
         embedding = self.transformer.encode([query]).tolist()
         results = self.collection.query(query_embeddings=embedding, n_results=k)
+        return self._parse_ids(results['ids'][0])
+
+    def search_batch(self, queries: List[str], k: int) -> List[List[Dict[str, Any]]]:
+        """Return top-k semantically similar chunk dicts for each query in a batch."""
+        embeddings = self.transformer.encode(queries).tolist()
+        results = self.collection.query(query_embeddings=embeddings, n_results=k)
+        return [self._parse_ids(ids) for ids in results['ids']]
+
+    @staticmethod
+    def _parse_ids(ids: List[str]) -> List[Dict[str, Any]]:
+        """Convert Chroma document IDs back into chunk dicts."""
         chunks = []
-        for doc_id in results['ids'][0]:
+        for doc_id in ids:
             file_path, start, end = doc_id.rsplit(':', 2)
             chunks.append({
                 'file_path': file_path,
@@ -129,25 +111,8 @@ class ChromaSearcher:
             })
         return chunks
 
-    def search_batch(self, queries: List[str], k: int) -> List[List[Dict[str, Any]]]:
-        """Return top-k semantically similar chunk dicts for each query in a batch."""
-        embeddings = self.transformer.encode(queries).tolist()
-        results = self.collection.query(query_embeddings=embeddings, n_results=k)
-        all_results = []
-        for ids_per_query in results['ids']:
-            chunks = []
-            for doc_id in ids_per_query:
-                file_path, start, end = doc_id.rsplit(':', 2)
-                chunks.append({
-                    'file_path': file_path,
-                    'first_character_index': int(start),
-                    'last_character_index': int(end),
-                })
-            all_results.append(chunks)
-        return all_results
 
-
-def _reciprocal_rank_fusion(bm25_results: List[Dict], chroma_results: List[Dict], k: int) -> List[Dict]:
+def reciprocal_rank_fusion(bm25_results: List[Dict], chroma_results: List[Dict], k: int) -> List[Dict]:
     """Merge BM25 and Chroma result lists into a single top-k ranking using Reciprocal Rank Fusion."""
     scores = {}
     chunks_map = {}

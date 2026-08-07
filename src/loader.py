@@ -7,7 +7,7 @@ class RagParser:
     """Walks a repository directory and loads all .py and .md files."""
 
     @staticmethod
-    def load_vocabulary(repo_path: str) -> List[Dict[str, str]]:
+    def discover_files(repo_path: str) -> List[Dict[str, str]]:
         """Return a list of {file_path, content} dicts for every .py/.md file found (excluding tests/)."""
         base_dir = Path(repo_path)
         documents = []

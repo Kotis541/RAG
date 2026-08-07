@@ -1,5 +1,4 @@
 from typing import Dict, Any, Generator
-from .parser import RagParser
 import ast
 import re
 
@@ -56,7 +55,6 @@ class RagChunker:
         if ".md" in file['file_path']:
             segments = []
 
-            # Find all heading positions (lines starting with one or more #)
             heading_positions = [0]
             for match in re.finditer(r'(?:^|\n)(#{1,6} )', content):
                 pos = match.start(1) if match.start(0) == 0 else match.start(0) + 1
@@ -156,7 +154,6 @@ class RagChunker:
                     if body_ranges[0][0] > start:
                         result.append((start, body_ranges[0][0]))
                     result.extend(body_ranges)
-
                     if body_ranges[-1][1] < end:
                         result.append((body_ranges[-1][1], end))
                     continue

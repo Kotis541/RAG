@@ -1,5 +1,5 @@
 import fire
-from .firemodels import RagPipeline
+from .pipeline import RagPipeline
 
 
 def main() -> None:
